@@ -18,6 +18,7 @@ pythonCopyfrom extreme_metrics import ExtremeMetricsAnalyzer
 
 analyzer = ExtremeMetricsAnalyzer()
 results = analyzer.analyze_scenarios(['126', '245', '370', '585'])
+
 3. pv_analysis.py
 Photovoltaic potential calculations.
 pythonCopyfrom pv_analysis import PVComputeEngine

@@ -203,9 +203,6 @@ class ClimateDataHandler:
         ds.attrs.update({
             'title': 'PV Potential Analysis Results',
             'creation_date': datetime.now().isoformat(),
-            'contact': 'your.email@institution.edu',
-            'references': 'Your paper citation',
-            **(metadata or {})
         })
         
         # Save with compression

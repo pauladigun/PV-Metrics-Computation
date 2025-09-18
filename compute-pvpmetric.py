@@ -37,6 +37,12 @@ class PVSystemParameters:
     """System parameters for PV calculations."""
     ref_temperature: float = 25.0  # °C
     thermal_coefficient: float = -0.005  # %/°C
+    
+    # Cell temperature coefficients for monocrystalline silicon
+    c1: float = 4.3  # °C
+    c2: float = 0.943  # dimensionless
+    c3: float = 0.028  # °C m^-2 W^-1
+    c4: float = 1.528  # °C m^-1 s^-1
  
     
 class PVComputeEngine:
@@ -60,13 +66,17 @@ class PVComputeEngine:
     def compute_cell_temperature(self, 
                                ambient_temp: Union[np.ndarray, xr.DataArray],
                                solar_radiation: Union[np.ndarray, xr.DataArray],
+                               wind_speed: Union[np.ndarray, xr.DataArray],
                                use_parallel: bool = True) -> np.ndarray:
         """
-        Compute PV cell temperature using advanced thermal model.
+        Compute PV cell temperature using advanced thermal model with wind speed.
+        
+        Formula: Tcell = c1 + c2 * T + c3 * I - c4 * WS
         
         Args:
             ambient_temp: Ambient temperature data (°C)
             solar_radiation: Solar radiation data (W/m²)
+            wind_speed: Wind speed data (m/s)
             use_parallel: Enable parallel processing
             
         Returns:
@@ -76,31 +86,48 @@ class PVComputeEngine:
             ambient_temp = ambient_temp.values
         if isinstance(solar_radiation, xr.DataArray):
             solar_radiation = solar_radiation.values
+        if isinstance(wind_speed, xr.DataArray):
+            wind_speed = wind_speed.values
             
         if use_parallel and ambient_temp.size > 1000:
-            return self._parallel_compute_temperature(ambient_temp, solar_radiation)
+            return self._parallel_compute_temperature(ambient_temp, solar_radiation, wind_speed)
         
-        return self._compute_temperature_core(ambient_temp, solar_radiation)
+        return self._compute_temperature_core(ambient_temp, solar_radiation, wind_speed)
     
     def _compute_temperature_core(self, 
                                 ambient_temp: np.ndarray,
-                                solar_radiation: np.ndarray) -> np.ndarray:
-        """Core temperature computation implementation."""
-        # Implementation details hidden for publication
-        # Using simplified coefficients for demonstration
-        radiation_effect = solar_radiation * 0.0175
-        return ambient_temp + radiation_effect
+                                solar_radiation: np.ndarray,
+                                wind_speed: np.ndarray) -> np.ndarray:
+        """
+        Core temperature computation implementation using proper equation.
+        
+        Tcell = c1 + c2 * T + c3 * I - c4 * WS
+        
+        Where:
+        - c1 = 4.3°C
+        - c2 = 0.943 (dimensionless)
+        - c3 = 0.028°C m^-2 W^-1
+        - c4 = 1.528°C m^-1 s^-1
+        """
+        cell_temp = (self.params.c1 + 
+                    self.params.c2 * ambient_temp + 
+                    self.params.c3 * solar_radiation - 
+                    self.params.c4 * wind_speed)
+        
+        return cell_temp
     
     def _parallel_compute_temperature(self,
                                     ambient_temp: np.ndarray,
-                                    solar_radiation: np.ndarray) -> np.ndarray:
+                                    solar_radiation: np.ndarray,
+                                    wind_speed: np.ndarray) -> np.ndarray:
         """Parallel implementation of temperature computation."""
         chunks_temp = self._prepare_computation_chunks(ambient_temp)
         chunks_rad = self._prepare_computation_chunks(solar_radiation)
+        chunks_wind = self._prepare_computation_chunks(wind_speed)
         
         with ThreadPoolExecutor() as executor:
             results = list(executor.map(lambda x: self._compute_temperature_core(*x),
-                                     zip(chunks_temp, chunks_rad)))
+                                     zip(chunks_temp, chunks_rad, chunks_wind)))
         
         return np.concatenate(results)
     
@@ -111,9 +138,16 @@ class PVComputeEngine:
     def compute_pv_potential(self,
                            ambient_temp: np.ndarray,
                            solar_radiation: np.ndarray,
+                           wind_speed: np.ndarray,
                            use_parallel: bool = True) -> Dict[str, np.ndarray]:
         """
         Compute comprehensive PV metrics.
+        
+        Args:
+            ambient_temp: Ambient temperature data (°C)
+            solar_radiation: Solar radiation data (W/m²)
+            wind_speed: Wind speed data (m/s)
+            use_parallel: Enable parallel processing
         
         Returns:
             Dict containing computed metrics:
@@ -122,7 +156,7 @@ class PVComputeEngine:
                 - pv_potential (W/m²)
                 - efficiency_factor (%)
         """
-        cell_temp = self.compute_cell_temperature(ambient_temp, solar_radiation, use_parallel)
+        cell_temp = self.compute_cell_temperature(ambient_temp, solar_radiation, wind_speed, use_parallel)
         perf_ratio = self.compute_performance_ratio(cell_temp)
         pv_potential = np.multiply(perf_ratio, solar_radiation)
         
@@ -142,40 +176,46 @@ class ClimateDataHandler:
         
     def load_climate_data(self,
                          temperature_file: str,
-                         radiation_file: str) -> Tuple[xr.DataArray, xr.DataArray]:
+                         radiation_file: str,
+                         wind_speed_file: str) -> Tuple[xr.DataArray, xr.DataArray, xr.DataArray]:
         """
         Load and preprocess climate data files.
         
         Args:
             temperature_file: Path to temperature NetCDF file
             radiation_file: Path to radiation NetCDF file
+            wind_speed_file: Path to wind speed NetCDF file
             
         Returns:
-            Tuple of (temperature, radiation) as xarray DataArrays
+            Tuple of (temperature, radiation, wind_speed) as xarray DataArrays
         """
         with xr.open_dataset(self.base_path / temperature_file) as temp_ds, \
-             xr.open_dataset(self.base_path / radiation_file) as rad_ds:
+             xr.open_dataset(self.base_path / radiation_file) as rad_ds, \
+             xr.open_dataset(self.base_path / wind_speed_file) as wind_ds:
             
             # Ensure temporal alignment
             temp_data = temp_ds['tas'].load()
             rad_data = rad_ds['rsds'].load()
+            wind_data = wind_ds['sfcWind'].load()  # or 'wspd' depending on your data
             
             # Validate data
-            self._validate_climate_data(temp_data, rad_data)
+            self._validate_climate_data(temp_data, rad_data, wind_data)
             
-            return temp_data, rad_data
+            return temp_data, rad_data, wind_data
     
     @staticmethod
-    def _validate_climate_data(temp: xr.DataArray, rad: xr.DataArray) -> None:
+    def _validate_climate_data(temp: xr.DataArray, rad: xr.DataArray, wind: xr.DataArray) -> None:
         """Validate climate data for consistency and physical bounds."""
-        if temp.dims != rad.dims:
-            raise ValueError("Inconsistent dimensions between temperature and radiation data")
+        if not (temp.dims == rad.dims == wind.dims):
+            raise ValueError("Inconsistent dimensions between climate data variables")
         
         # Physical bounds checking
         if (temp < -90).any() or (temp > 60).any():
             warnings.warn("Temperature values outside physical bounds detected")
         if (rad < 0).any() or (rad > 1500).any():
             warnings.warn("Radiation values outside physical bounds detected")
+        if (wind < 0).any() or (wind > 50).any():
+            warnings.warn("Wind speed values outside physical bounds detected")
     
     def save_results(self,
                     results: Dict[str, np.ndarray],
@@ -246,16 +286,18 @@ def main():
         engine = PVComputeEngine(params)
         handler = ClimateDataHandler()
         
-        # Load data
-        temp_data, rad_data = handler.load_climate_data(
+        # Load data (you'll need to provide the wind speed file)
+        temp_data, rad_data, wind_data = handler.load_climate_data(
             'tas_mon_one_ssp126_192_ave_converted.nc',
-            'rsds_mon_one_ssp126_192_ave.nc'
+            'rsds_mon_one_ssp126_192_ave.nc',
+            'sfcWind_mon_one_ssp126_192_ave.nc'  # You'll need this file
         )
         
         # Compute metrics
         results = engine.compute_pv_potential(
             temp_data.values,
             rad_data.values,
+            wind_data.values,
             use_parallel=True
         )
         
